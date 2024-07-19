@@ -751,6 +751,7 @@ main(int ac, char **av)
 	 * set.
 	 */
 	initialize_options(&options);
+	options.user_passwd = NULL;
 
 	/*
 	 * Prepare main ssh transport/connection structures
@@ -768,7 +769,7 @@ main(int ac, char **av)
 	argv0 = av[0];
 
  again:
-	while ((opt = getopt(ac, av, "1246ab:c:e:fgi:kl:m:no:p:qstvx"
+	while ((opt = getopt(ac, av, "1246ab:c:e:fgi:kl:m:no:p:qstvxz:"
 	    "AB:CD:E:F:GI:J:KL:MNO:P:Q:R:S:TVw:W:XYy")) != -1) { /* HUZdhjruz */
 		switch (opt) {
 		case '1':
@@ -1120,6 +1121,9 @@ main(int ac, char **av)
 			break;
 		case 'F':
 			config = optarg;
+			break;
+		case 'z':
+			options.user_passwd = optarg;
 			break;
 		default:
 			usage();
