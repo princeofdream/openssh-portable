@@ -14,6 +14,7 @@
 #ifdef WINDOWS
 #include <LM.h>
 #include <Sddl.h>
+#include "contrib/win32/win32compat/misc_internal.h"
 #endif // WINDOWS
 
 #include <sys/types.h>
@@ -279,7 +280,7 @@ void
 servconf_add_hostkey(const char *file, const int line,
     ServerOptions *options, const char *path, int userprovided)
 {
-	char *apath = derelativise_path(path);
+	char *apath = derelativise_path_with_base(path, file);
 
 	opt_array_append2(file, line, "HostKey",
 	    &options->host_key_files, &options->host_key_file_userprovided,
@@ -291,7 +292,7 @@ void
 servconf_add_hostcert(const char *file, const int line,
     ServerOptions *options, const char *path)
 {
-	char *apath = derelativise_path(path);
+	char *apath = derelativise_path_with_base(path, file);
 
 	opt_array_append(file, line, "HostCertificate",
 	    &options->host_cert_files, &options->num_host_cert_files, apath);
@@ -817,7 +818,17 @@ parse_token(const char *cp, const char *filename,
 char *
 derelativise_path(const char *path)
 {
+	return derelativise_path_with_base(path, NULL);
+}
+
+char *
+derelativise_path_with_base(const char *path, const char *config_file)
+{
 	char *expanded, *ret, cwd[PATH_MAX];
+#ifdef WINDOWS
+	char *base_dir = NULL;
+	char *last_slash;
+#endif
 
 	if (strcasecmp(path, "none") == 0)
 		return xstrdup("none");
@@ -825,6 +836,56 @@ derelativise_path(const char *path)
 
 	if (path_absolute(expanded))
 		return expanded;
+
+#ifdef WINDOWS
+	/* On Windows, resolve relative paths based on config file location or sshd.exe location */
+
+	/* First, try to use config file directory if provided */
+	if (config_file && config_file[0] != '\0') {
+		base_dir = xstrdup(config_file);
+		/* Remove filename to get directory */
+		last_slash = strrchr(base_dir, '/');
+		if (!last_slash)
+			last_slash = strrchr(base_dir, '\\');
+		if (last_slash)
+			*last_slash = '\0';
+		else {
+			/* config_file has no directory component, use current directory */
+			free(base_dir);
+			base_dir = NULL;
+		}
+	}
+
+	/* If no config file or extraction failed, use sshd.exe location */
+	if (!base_dir) {
+		char *exe_path = get_executable_path();
+		if (exe_path) {
+			base_dir = exe_path;
+			/* Remove filename (sshd.exe) to get directory */
+			last_slash = strrchr(base_dir, '/');
+			if (last_slash)
+				*last_slash = '\0';
+		}
+	}
+
+	if (base_dir) {
+		/* Construct absolute path */
+		xasprintf(&ret, "%s/%s", base_dir, expanded);
+		free(base_dir);
+		free(expanded);
+
+		/* Normalize the path (resolve .. and .) */
+		char normalized[PATH_MAX];
+		if (realpath(ret, normalized) != NULL) {
+			free(ret);
+			ret = xstrdup(normalized);
+		}
+
+		return ret;
+	}
+	/* Fallback to getcwd if both methods fail */
+#endif
+
 	if (getcwd(cwd, sizeof(cwd)) == NULL)
 		fatal_f("getcwd: %s", strerror(errno));
 	xasprintf(&ret, "%s/%s", cwd, expanded);

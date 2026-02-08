@@ -332,6 +332,7 @@ void	 servconf_merge_subsystems(ServerOptions *, ServerOptions *);
 void	 copy_set_server_options(ServerOptions *, ServerOptions *, int);
 void	 dump_config(ServerOptions *);
 char	*derelativise_path(const char *);
+char	*derelativise_path_with_base(const char *, const char *);
 void	 servconf_add_hostkey(const char *, const int,
 	    ServerOptions *, const char *path, int);
 void	 servconf_add_hostcert(const char *, const int,

@@ -102,6 +102,262 @@ static VOID WINAPI service_handler(DWORD dwControl)
 }
 
 #define SSH_HOSTKEY_GEN_CMDLINE L"ssh-keygen -A"
+
+/* Get the relative path for etc/ssh based on executable location */
+static char*
+get_relative_etc_ssh_path()
+{
+	char *exe_path = get_executable_path();
+	char *etc_ssh_path = NULL;
+	char *last_slash;
+
+	if (!exe_path)
+		return NULL;
+
+	/* Allocate buffer for path */
+	etc_ssh_path = malloc(PATH_MAX);
+	if (!etc_ssh_path) {
+		free(exe_path);
+		return NULL;
+	}
+
+	/* Copy executable path */
+	strcpy_s(etc_ssh_path, PATH_MAX, exe_path);
+
+	/* Remove filename (sshd.exe) */
+	last_slash = strrchr(etc_ssh_path, '/');
+	if (last_slash)
+		*last_slash = '\0';
+
+	/* Remove bin directory */
+	last_slash = strrchr(etc_ssh_path, '/');
+	if (last_slash)
+		*last_slash = '\0';
+
+	/* Append /etc/ssh */
+	strcat_s(etc_ssh_path, PATH_MAX, "/etc/ssh");
+
+	free(exe_path);
+	return etc_ssh_path;
+}
+
+/* Check if a directory exists */
+static int
+directory_exists(const char *path)
+{
+	wchar_t *path_w = utf8_to_utf16(path);
+	DWORD attrs;
+
+	if (!path_w)
+		return 0;
+
+	attrs = GetFileAttributesW(path_w);
+	free(path_w);
+
+	return (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY));
+}
+
+/* Check if a file exists */
+static int
+file_exists(const char *path)
+{
+	wchar_t *path_w = utf8_to_utf16(path);
+	DWORD attrs;
+
+	if (!path_w)
+		return 0;
+
+	attrs = GetFileAttributesW(path_w);
+	free(path_w);
+
+	return (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY));
+}
+
+/* Create directory recursively */
+static int
+create_directory_recursive(const char *path)
+{
+	char *path_copy = _strdup(path);
+	char *p;
+	int ret = 0;
+
+	if (!path_copy)
+		return -1;
+
+	/* Convert forward slashes to backslashes for Windows */
+	for (p = path_copy; *p; p++) {
+		if (*p == '/')
+			*p = '\\';
+	}
+
+	/* Create each directory in the path */
+	for (p = path_copy + 1; *p; p++) {
+		if (*p == '\\') {
+			*p = '\0';
+			if (!directory_exists(path_copy)) {
+				wchar_t *dir_w = utf8_to_utf16(path_copy);
+				if (dir_w) {
+					if (!CreateDirectoryW(dir_w, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
+						free(dir_w);
+						ret = -1;
+						goto cleanup;
+					}
+					free(dir_w);
+				}
+			}
+			*p = '\\';
+		}
+	}
+
+	/* Create the final directory */
+	if (!directory_exists(path_copy)) {
+		wchar_t *dir_w = utf8_to_utf16(path_copy);
+		if (dir_w) {
+			if (!CreateDirectoryW(dir_w, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
+				free(dir_w);
+				ret = -1;
+				goto cleanup;
+			}
+			free(dir_w);
+		}
+	}
+
+cleanup:
+	free(path_copy);
+	return ret;
+}
+
+/* Generate host keys in the specified directory */
+static void
+generate_host_keys_in_dir(const char *etc_ssh_path)
+{
+	STARTUPINFOW si;
+	PROCESS_INFORMATION pi;
+	wchar_t cmdline[PATH_MAX];
+	wchar_t *etc_ssh_w;
+	char old_sshdir[PATH_MAX] = {0};
+	char *env_value = NULL;
+	size_t len = 0;
+
+	/* Save old SSHDIR environment variable if it exists */
+	_dupenv_s(&env_value, &len, "SSHDIR");
+	if (env_value) {
+		strcpy_s(old_sshdir, sizeof(old_sshdir), env_value);
+		free(env_value);
+	}
+
+	/* Set SSHDIR to our relative path */
+	_putenv_s("SSHDIR", etc_ssh_path);
+
+	/* Generate host keys */
+	ZeroMemory(&si, sizeof(si));
+	si.cb = sizeof(STARTUPINFOW);
+	ZeroMemory(&pi, sizeof(pi));
+
+	etc_ssh_w = utf8_to_utf16(etc_ssh_path);
+	if (etc_ssh_w) {
+		swprintf_s(cmdline, PATH_MAX, L"ssh-keygen.exe -A -f \"%s\"", etc_ssh_w);
+		free(etc_ssh_w);
+
+		if (CreateProcessW(NULL, cmdline, NULL, NULL, FALSE, CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi)) {
+			WaitForSingleObject(pi.hProcess, INFINITE);
+			CloseHandle(pi.hThread);
+			CloseHandle(pi.hProcess);
+		}
+	}
+
+	/* Restore old SSHDIR environment variable */
+	if (old_sshdir[0])
+		_putenv_s("SSHDIR", old_sshdir);
+	else
+		_putenv("SSHDIR=");
+}
+
+/* Create default sshd_config with relative paths */
+static void
+create_default_sshd_config(const char *config_path)
+{
+	FILE *f = fopen(config_path, "w");
+	if (!f)
+		return;
+
+	fprintf(f, "# sshd_config - OpenSSH SSH daemon configuration file\n");
+	fprintf(f, "# This is a minimal configuration file for Windows\n\n");
+	fprintf(f, "# Host Keys - using relative paths\n");
+	fprintf(f, "HostKey ../etc/ssh/ssh_host_rsa_key\n");
+	fprintf(f, "HostKey ../etc/ssh/ssh_host_ecdsa_key\n");
+	fprintf(f, "HostKey ../etc/ssh/ssh_host_ed25519_key\n\n");
+	fprintf(f, "# Logging\n");
+	fprintf(f, "SyslogFacility AUTH\n");
+	fprintf(f, "LogLevel INFO\n\n");
+	fprintf(f, "# Authentication\n");
+	fprintf(f, "PubkeyAuthentication yes\n");
+	fprintf(f, "PasswordAuthentication yes\n");
+	fprintf(f, "PermitEmptyPasswords no\n\n");
+	fprintf(f, "# Windows specific\n");
+	fprintf(f, "Subsystem sftp sftp-server.exe\n\n");
+	fprintf(f, "# Security\n");
+	fprintf(f, "PermitRootLogin no\n");
+	fprintf(f, "StrictModes yes\n");
+
+	fclose(f);
+}
+
+/* Setup SSH configuration in relative path */
+static void
+setup_relative_ssh_config()
+{
+	char *etc_ssh_path = get_relative_etc_ssh_path();
+	char config_path[PATH_MAX];
+	char hostkey_path[PATH_MAX];
+	int need_generate_keys = 0;
+
+	if (!etc_ssh_path) {
+		printf("Failed to determine relative etc/ssh path\n");
+		return;
+	}
+
+	printf("Using SSH configuration directory: %s\n", etc_ssh_path);
+
+	/* Create etc/ssh directory if it doesn't exist */
+	if (!directory_exists(etc_ssh_path)) {
+		printf("Creating directory: %s\n", etc_ssh_path);
+		if (create_directory_recursive(etc_ssh_path) < 0) {
+			printf("Failed to create directory: %s\n", etc_ssh_path);
+			free(etc_ssh_path);
+			return;
+		}
+	}
+
+	/* Check for sshd_config */
+	snprintf(config_path, sizeof(config_path), "%s/sshd_config", etc_ssh_path);
+	if (!file_exists(config_path)) {
+		printf("Creating default sshd_config: %s\n", config_path);
+		create_default_sshd_config(config_path);
+	}
+
+	/* Check for host keys */
+	snprintf(hostkey_path, sizeof(hostkey_path), "%s/ssh_host_rsa_key", etc_ssh_path);
+	if (!file_exists(hostkey_path))
+		need_generate_keys = 1;
+
+	snprintf(hostkey_path, sizeof(hostkey_path), "%s/ssh_host_ecdsa_key", etc_ssh_path);
+	if (!file_exists(hostkey_path))
+		need_generate_keys = 1;
+
+	snprintf(hostkey_path, sizeof(hostkey_path), "%s/ssh_host_ed25519_key", etc_ssh_path);
+	if (!file_exists(hostkey_path))
+		need_generate_keys = 1;
+
+	/* Generate host keys if needed */
+	if (need_generate_keys) {
+		printf("Generating host keys in: %s\n", etc_ssh_path);
+		generate_host_keys_in_dir(etc_ssh_path);
+	}
+
+	free(etc_ssh_path);
+}
+
 static void
 generate_host_keys()
 {
@@ -192,8 +448,18 @@ create_openssh_registry_key()
 static void
 prereq_setup()
 {
-	create_prgdata_ssh_folder();
-	generate_host_keys();
+	char programdata_ssh[PATH_MAX];
+
+	/* First, try to setup relative path configuration */
+	setup_relative_ssh_config();
+
+	/* Check if %PROGRAMDATA%\ssh exists, if not create it */
+	snprintf(programdata_ssh, sizeof(programdata_ssh), "%s\\ssh", __progdata);
+	if (!directory_exists(programdata_ssh)) {
+		create_prgdata_ssh_folder();
+		generate_host_keys();
+	}
+
 	create_openssh_registry_key();
 }
 

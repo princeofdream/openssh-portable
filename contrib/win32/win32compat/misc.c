@@ -2149,3 +2149,145 @@ strrstr(const char *inStr, const char *pattern)
 	return last;
 }
 
+/*
+ * Convert Unix-style path to Windows-style path
+ * Handles:
+ * - /c/path/to/file -> c:\path\to\file
+ * - /cygdrive/c/path -> c:\path
+ * - /path/to/file -> \path\to\file (relative to current drive)
+ *
+ * Returns: newly allocated string with Windows path, or NULL on error
+ * Caller must free() the returned string
+ */
+char*
+unix_path_to_windows_path(const char *unix_path)
+{
+	char *win_path = NULL;
+	size_t path_len;
+	const char *src;
+	char *dst;
+
+	if (!unix_path) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	path_len = strlen(unix_path);
+	if (path_len == 0) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	/* Allocate buffer for Windows path (same size should be sufficient) */
+	if ((win_path = malloc(path_len + 3)) == NULL) {
+		errno = ENOMEM;
+		return NULL;
+	}
+
+	/* Handle /cygdrive/X/path format */
+	if (path_len >= 11 && _strnicmp(unix_path, "/cygdrive/", 10) == 0 &&
+	    isalpha((unsigned char)unix_path[10])) {
+		win_path[0] = unix_path[10];
+		win_path[1] = ':';
+		if (path_len > 11) {
+			strcpy_s(win_path + 2, path_len + 1, unix_path + 11);
+		} else {
+			win_path[2] = '\\';
+			win_path[3] = '\0';
+		}
+		convertToBackslash(win_path);
+		return win_path;
+	}
+
+	/* Handle /X/path format (where X is a drive letter) */
+	if (path_len >= 2 && unix_path[0] == '/' && isalpha((unsigned char)unix_path[1])) {
+		if (path_len == 2 || unix_path[2] == '/') {
+			win_path[0] = unix_path[1];
+			win_path[1] = ':';
+			if (path_len > 2) {
+				strcpy_s(win_path + 2, path_len + 1, unix_path + 2);
+			} else {
+				win_path[2] = '\\';
+				win_path[3] = '\0';
+			}
+			convertToBackslash(win_path);
+			return win_path;
+		}
+	}
+
+	/* Handle regular Unix path - just convert slashes */
+	strcpy_s(win_path, path_len + 1, unix_path);
+	convertToBackslash(win_path);
+
+	return win_path;
+}
+
+/*
+ * Get the full path of the current executable
+ *
+ * Returns: newly allocated string with executable path, or NULL on error
+ * Caller must free() the returned string
+ */
+char*
+get_executable_path()
+{
+	wchar_t module_path_w[PATH_MAX];
+	char *module_path = NULL;
+	DWORD len;
+
+	/* Get the full path of the current module (executable) */
+	len = GetModuleFileNameW(NULL, module_path_w, PATH_MAX);
+	if (len == 0 || len >= PATH_MAX) {
+		errno = errno_from_Win32LastError();
+		return NULL;
+	}
+
+	/* Convert from UTF-16 to UTF-8 */
+	module_path = utf16_to_utf8(module_path_w);
+	if (!module_path) {
+		errno = ENOMEM;
+		return NULL;
+	}
+
+	/* Convert backslashes to forward slashes for consistency with OpenSSH conventions */
+	convertToForwardslash(module_path);
+
+	return module_path;
+}
+
+/*
+ * Get the current working directory (where the command was executed from)
+ * Example: if you run ".\output\bin\sshd.exe" from "D:\envx\programs\neoshell",
+ *          this returns "D:/envx/programs/neoshell"
+ *
+ * Returns: newly allocated string with working directory path, or NULL on error
+ * Caller must free() the returned string
+ */
+char*
+get_working_directory()
+{
+	wchar_t cwd_w[PATH_MAX];
+	char *cwd = NULL;
+
+	/* Get the current working directory */
+	if (_wgetcwd(cwd_w, PATH_MAX) == NULL) {
+		errno = errno_from_Win32LastError();
+		return NULL;
+	}
+
+	/* Convert from UTF-16 to UTF-8 */
+	cwd = utf16_to_utf8(cwd_w);
+	if (!cwd) {
+		errno = ENOMEM;
+		return NULL;
+	}
+
+	/* Convert backslashes to forward slashes for consistency with OpenSSH conventions */
+	convertToForwardslash(cwd);
+
+	/* Convert to lowercase for consistency */
+	to_lower_case(cwd);
+
+	return cwd;
+}
+
