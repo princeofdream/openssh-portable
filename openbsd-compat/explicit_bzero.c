@@ -15,7 +15,19 @@
 
 #ifndef HAVE_EXPLICIT_BZERO
 
-#ifdef HAVE_EXPLICIT_MEMSET
+#ifdef _WIN32
+/* Use Windows SecureZeroMemory for secure memory zeroing */
+#include <windows.h>
+
+void
+explicit_bzero(void *p, size_t n)
+{
+	if (n == 0)
+		return;
+	SecureZeroMemory(p, n);
+}
+
+#elif defined(HAVE_EXPLICIT_MEMSET)
 
 void
 explicit_bzero(void *p, size_t n)
